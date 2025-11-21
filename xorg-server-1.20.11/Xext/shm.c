@@ -199,6 +199,8 @@ ShmCloseScreen(ScreenPtr pScreen)
     ShmScrPrivateRec *screen_priv = ShmGetScreenPriv(pScreen);
 
     pScreen->CloseScreen = screen_priv->CloseScreen;
+    if (screen_priv->destroyPixmap)
+        pScreen->DestroyPixmap = screen_priv->destroyPixmap;
     dixSetPrivate(&pScreen->devPrivates, shmScrPrivateKey, NULL);
     free(screen_priv);
     return (*pScreen->CloseScreen) (pScreen);
@@ -255,6 +257,11 @@ ShmDestroyPixmap(PixmapPtr pPixmap)
 
     if (pPixmap->refcnt == 1)
         shmdesc = dixLookupPrivate(&pPixmap->devPrivates, shmPixmapPrivateKey);
+
+    if (!screen_priv) {
+        /* screen_priv was already freed during CloseScreen */
+        return TRUE;
+    }
 
     pScreen->DestroyPixmap = screen_priv->destroyPixmap;
     ret = (*pScreen->DestroyPixmap) (pPixmap);
