@@ -199,6 +199,8 @@ ShmCloseScreen(ScreenPtr pScreen)
     ShmScrPrivateRec *screen_priv = ShmGetScreenPriv(pScreen);
 
     pScreen->CloseScreen = screen_priv->CloseScreen;
+    /* Restore original DestroyPixmap to prevent crashes if pixmaps are
+     * destroyed after screen cleanup (e.g., during shutdown sequence) */
     if (screen_priv->destroyPixmap)
         pScreen->DestroyPixmap = screen_priv->destroyPixmap;
     dixSetPrivate(&pScreen->devPrivates, shmScrPrivateKey, NULL);
@@ -255,13 +257,13 @@ ShmDestroyPixmap(PixmapPtr pPixmap)
     void *shmdesc = NULL;
     Bool ret;
 
-    if (pPixmap->refcnt == 1)
-        shmdesc = dixLookupPrivate(&pPixmap->devPrivates, shmPixmapPrivateKey);
-
     if (!screen_priv) {
         /* screen_priv was already freed during CloseScreen */
         return TRUE;
     }
+
+    if (pPixmap->refcnt == 1)
+        shmdesc = dixLookupPrivate(&pPixmap->devPrivates, shmPixmapPrivateKey);
 
     pScreen->DestroyPixmap = screen_priv->destroyPixmap;
     ret = (*pScreen->DestroyPixmap) (pPixmap);
