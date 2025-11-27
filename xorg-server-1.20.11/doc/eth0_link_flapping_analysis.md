@@ -85,9 +85,9 @@ cat /etc/crontab
 # 检查系统服务
 systemctl list-timers
 
-# 搜索可能影响网络的脚本
-grep -r "ifup\|ifdown\|ip link\|nmcli" /var/lib/sdsom/
-grep -r "eth0\|bond0" /var/lib/sdsom/
+# 搜索可能影响网络的脚本 (根据系统实际路径调整)
+grep -r "ifup\|ifdown\|ip link\|nmcli" /var/lib/ /opt/ /usr/local/bin/
+grep -r "eth0\|bond0" /etc/cron* /var/lib/ /opt/
 ```
 
 ### 步骤 2: 检查 NetworkManager 日志
@@ -153,8 +153,10 @@ echo "options r8169 aspm=0" > /etc/modprobe.d/r8169.conf
 
 ### 方案 4: 固定 PHY 协商参数
 
+> ⚠️ **警告**: 禁用自动协商可能导致网络连接问题。请确保交换机端口配置与以下设置完全匹配，否则可能造成连接丢失。建议在远程管理环境中使用带外管理或物理访问。
+
 ```bash
-# 强制设置速度和双工模式
+# 强制设置速度和双工模式 (需要确保交换机端口配置一致)
 ethtool -s eth0 speed 1000 duplex full autoneg off
 ```
 
@@ -174,8 +176,9 @@ journalctl -k | grep -c "eth0: Link is"
 ## 注意事项
 
 1. 此分析基于提供的日志片段，完整诊断需要更多系统信息。
-2. 此仓库为 X.org 服务器代码库，与网络问题无直接关联。
+2. **重要**: 此仓库为 X.org 服务器代码库，eth0 网络接口问题与 X.org 代码无直接关联。此文档仅作为问题分析参考，生产环境中的网络问题应参考系统管理或网络相关文档。
 3. 建议在生产环境中谨慎测试任何更改。
+4. 远程操作网络配置前，确保有带外管理或物理访问方式。
 
 ## 参考资料
 
