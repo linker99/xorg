@@ -339,6 +339,111 @@ lspci -vvv -s 03:00.0 | grep -i "aspm\|lnkctl"
 ethtool -s eth0 speed 1000 duplex full autoneg off
 ```
 
+### 方案 7: 配置 r8169 高性能模式
+
+r8169 驱动支持多个参数来优化性能和稳定性。以下是配置高性能模式的方法：
+
+**完整的高性能配置**
+
+```bash
+# 创建或编辑驱动配置文件
+cat > /etc/modprobe.d/r8169.conf << 'EOF'
+# 禁用 ASPM 电源管理，提高稳定性
+options r8169 aspm=0
+EOF
+
+# 重新加载驱动
+modprobe -r r8169 && modprobe r8169
+```
+
+**使用 ethtool 配置高性能参数**
+
+```bash
+# 禁用节能模式 (Wake-on-LAN 相关)
+ethtool -s eth0 wol d
+
+# 增大 Ring Buffer 大小以提高吞吐量
+ethtool -G eth0 rx 4096 tx 4096
+
+# 启用接收校验和卸载
+ethtool -K eth0 rx on tx on
+
+# 启用 TCP 分段卸载
+ethtool -K eth0 tso on gso on gro on
+
+# 启用中断合并以减少 CPU 使用
+ethtool -C eth0 adaptive-rx on adaptive-tx on
+```
+
+**持久化 ethtool 配置**
+
+方法 1: 使用 NetworkManager dispatcher 脚本
+```bash
+cat > /etc/NetworkManager/dispatcher.d/99-r8169-tuning << 'EOF'
+#!/bin/bash
+if [ "$1" = "eth0" ] && [ "$2" = "up" ]; then
+    ethtool -s eth0 wol d
+    ethtool -G eth0 rx 4096 tx 4096 2>/dev/null
+    ethtool -K eth0 rx on tx on tso on gso on gro on
+    ethtool -C eth0 adaptive-rx on adaptive-tx on 2>/dev/null
+fi
+EOF
+chmod +x /etc/NetworkManager/dispatcher.d/99-r8169-tuning
+```
+
+方法 2: 使用 udev 规则
+```bash
+cat > /etc/udev/rules.d/99-r8169-tuning.rules << 'EOF'
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth0", RUN+="/sbin/ethtool -s eth0 wol d", RUN+="/sbin/ethtool -K eth0 rx on tx on tso on gso on gro on"
+EOF
+udevadm control --reload-rules
+```
+
+方法 3: 使用 systemd 服务
+```bash
+cat > /etc/systemd/system/r8169-tuning.service << 'EOF'
+[Unit]
+Description=R8169 Network Card Tuning
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ethtool -s eth0 wol d
+ExecStart=/sbin/ethtool -G eth0 rx 4096 tx 4096
+ExecStart=/sbin/ethtool -K eth0 rx on tx on tso on gso on gro on
+ExecStart=/sbin/ethtool -C eth0 adaptive-rx on adaptive-tx on
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable r8169-tuning.service
+systemctl start r8169-tuning.service
+```
+
+**验证高性能配置**
+
+```bash
+# 查看当前 Ring Buffer 设置
+ethtool -g eth0
+
+# 查看当前 Offload 设置
+ethtool -k eth0
+
+# 查看当前 Coalesce 设置
+ethtool -c eth0
+
+# 查看驱动参数
+cat /sys/module/r8169/parameters/*
+```
+
+> **注意**: 
+> 1. 并非所有 r8169 芯片版本都支持上述全部功能，不支持的设置会被忽略
+> 2. 增大 Ring Buffer 会增加内存使用
+> 3. 禁用 WoL 后，系统将无法通过网络唤醒
+
 ## 监控命令
 
 ```bash
