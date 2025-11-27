@@ -160,6 +160,25 @@ modprobe -r r8169 && modprobe r8169
 
 > **注意**: 禁用 ASPM 会略微增加功耗，但可以提高链路稳定性。
 
+**如何验证参数生效？**
+
+```bash
+# 方法 1: 检查驱动加载的参数
+cat /sys/module/r8169/parameters/aspm
+# 输出应为 0
+
+# 方法 2: 检查 modprobe 配置是否正确读取
+modprobe -c | grep r8169
+# 应显示: options r8169 aspm=0
+
+# 方法 3: 检查 dmesg 中的驱动加载信息
+dmesg | grep -i "r8169\|aspm"
+
+# 方法 4: 检查 PCIe 设备的 ASPM 状态
+lspci -vvv -s 03:00.0 | grep -i "aspm\|lnkctl"
+# LnkCtl: ASPM Disabled 表示已禁用
+```
+
 ### 方案 3: 检查物理层
 
 1. 更换网线
