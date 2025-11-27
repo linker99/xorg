@@ -45,7 +45,19 @@ PHY类型: Generic FE-GE Realtek PHY
 
 ## 可能的根本原因
 
-### 1. 脚本冲突 (最可能)
+### 1. Bond/VLAN 初始化顺序问题 (高度可能)
+
+**症状特征**:
+- 仅配置 eth0 时，重启后问题依然存在
+- 重启 network 服务后 eth0 可以稳定，但 bond 和 vlan 持续 up/down
+- 开机后十几分钟 eth0 无法恢复正常
+
+这表明问题可能与 **网络接口初始化顺序和依赖关系** 有关：
+- Bond 接口在 slave (eth0) 完全就绪前尝试初始化
+- VLAN 接口在 bond0 不稳定时反复尝试配置
+- 各接口配置脚本之间存在竞争条件
+
+### 2. 脚本冲突
 
 日志中显示有脚本持续调用网络配置：
 - `/etc/sysconfig/network-scripts/ifcfg-bond0`
@@ -54,7 +66,7 @@ PHY类型: Generic FE-GE Realtek PHY
 
 这些配置文件被反复加载可能导致网络接口重置。
 
-### 2. 定时任务或监控脚本
+### 3. 定时任务或监控脚本
 
 日志显示：
 ```
@@ -63,13 +75,13 @@ esyslog_log_dump_common.sh
 ```
 这些脚本可能包含网络操作逻辑。
 
-### 3. 硬件/物理层问题
+### 4. 硬件/物理层问题
 
 - 网线连接不良
 - 交换机端口配置问题
 - 网卡硬件故障
 
-### 4. 驱动问题
+### 5. 驱动问题
 
 r8169 驱动在某些配置下可能存在稳定性问题。
 
@@ -98,15 +110,39 @@ nmcli device status
 nmcli connection show
 ```
 
-### 步骤 3: 检查 Bond 配置
+### 步骤 3: 检查 Bond 配置和初始化顺序
 
 ```bash
+# 查看 bond 状态
 cat /proc/net/bonding/bond0
+
+# 检查接口配置文件
 cat /etc/sysconfig/network-scripts/ifcfg-bond0
 cat /etc/sysconfig/network-scripts/ifcfg-eth0
+cat /etc/sysconfig/network-scripts/ifcfg-vlan*
+
+# 检查接口启动顺序
+ls -la /etc/sysconfig/network-scripts/ifcfg-*
+
+# 检查 NetworkManager 是否管理这些接口
+nmcli device status
+nmcli connection show
 ```
 
-### 步骤 4: 检查硬件状态
+### 步骤 4: 隔离测试 - 仅 eth0
+
+```bash
+# 停止所有网络
+systemctl stop network
+
+# 手动只启动 eth0
+ip link set eth0 up
+
+# 观察 10 分钟是否稳定
+watch -n 1 "ip link show eth0; dmesg | tail -5 | grep -i eth0"
+```
+
+### 步骤 5: 检查硬件状态
 
 ```bash
 ethtool eth0
@@ -115,7 +151,7 @@ dmesg | grep -i eth0
 lspci -vvv -s 03:00.0
 ```
 
-### 步骤 5: 检查 r8169 驱动参数
+### 步骤 6: 检查 r8169 驱动参数
 
 ```bash
 modinfo r8169
@@ -124,19 +160,128 @@ cat /sys/module/r8169/parameters/*
 
 ## 建议解决方案
 
-### 方案 1: 禁用冲突的配置脚本
+### 方案 1: 修复 Bond/VLAN 初始化顺序 (推荐首先尝试)
+
+根据用户反馈，问题可能与网络接口初始化顺序有关。
+
+**步骤 1: 检查并修复 ifcfg 配置文件的依赖关系**
+
+```bash
+# 检查 eth0 配置 - 确保有 SLAVE=yes 和 MASTER=bond0
+cat /etc/sysconfig/network-scripts/ifcfg-eth0
+
+# eth0 应包含:
+# TYPE=Ethernet
+# BOOTPROTO=none
+# ONBOOT=yes
+# SLAVE=yes
+# MASTER=bond0
+```
+
+```bash
+# 检查 bond0 配置
+cat /etc/sysconfig/network-scripts/ifcfg-bond0
+
+# bond0 应包含:
+# TYPE=Bond
+# BONDING_MASTER=yes
+# BONDING_OPTS="mode=active-backup miimon=100"
+# ONBOOT=yes
+```
+
+```bash
+# 检查 VLAN 配置 - 确保 VLAN 在 bond0 上
+cat /etc/sysconfig/network-scripts/ifcfg-vlan8
+
+# vlan8 应包含:
+# VLAN=yes
+# DEVICE=vlan8
+# PHYSDEV=bond0
+# ONBOOT=yes
+```
+
+**步骤 2: 尝试禁用 VLAN 接口进行隔离测试**
+
+```bash
+# 临时禁用 vlan 接口
+ifdown vlan8
+ifdown vlan9
+
+# 或者修改配置
+sed -i 's/ONBOOT=yes/ONBOOT=no/' /etc/sysconfig/network-scripts/ifcfg-vlan8
+sed -i 's/ONBOOT=yes/ONBOOT=no/' /etc/sysconfig/network-scripts/ifcfg-vlan9
+
+# 重启 network 服务
+systemctl restart network
+
+# 观察 eth0 和 bond0 是否稳定
+watch -n 1 "ip link show eth0; ip link show bond0"
+```
+
+**步骤 3: 如果 eth0+bond0 稳定，逐个启用 VLAN**
+
+```bash
+# 启用 vlan8
+ifup vlan8
+# 观察是否稳定
+
+# 如果稳定，启用 vlan9
+ifup vlan9
+```
+
+### 方案 2: 完全迁移到 NetworkManager (推荐)
+
+由于系统正在使用已弃用的 network-scripts，建议完全迁移到 NetworkManager：
+
+```bash
+# 备份现有配置
+cp -r /etc/sysconfig/network-scripts /etc/sysconfig/network-scripts.bak
+
+# 停用 network 服务
+systemctl stop network
+systemctl disable network
+
+# 确保 NetworkManager 正在运行
+systemctl enable NetworkManager
+systemctl start NetworkManager
+
+# 使用 nmcli 重新配置
+# 删除旧连接
+nmcli connection delete bond0 2>/dev/null
+nmcli connection delete eth0 2>/dev/null
+
+# 创建 bond 连接
+nmcli connection add type bond con-name bond0 ifname bond0 \
+    bond.options "mode=active-backup,miimon=100"
+
+# 添加 eth0 作为 slave
+nmcli connection add type ethernet con-name eth0 ifname eth0 master bond0
+
+# 配置 bond0 的 IP
+nmcli connection modify bond0 ipv4.addresses "70.189.7.8/24"
+nmcli connection modify bond0 ipv4.method manual
+
+# 如果需要 VLAN
+nmcli connection add type vlan con-name vlan8 dev bond0 id 8
+nmcli connection add type vlan con-name vlan9 dev bond0 id 9
+
+# 启用连接
+nmcli connection up bond0
+```
+
+### 方案 3: 禁用冲突的配置脚本
 
 根据日志显示的 deprecated 警告，系统正在使用旧版 network-scripts：
 
 ```bash
-# 迁移到 NetworkManager
-nmcli connection import type ethernet file /etc/sysconfig/network-scripts/ifcfg-bond0
+# 查找可能导致网络重置的脚本
+grep -r "ifup\|ifdown\|systemctl.*network\|nmcli" /var/lib/sdsom/ /opt/ /etc/cron*
 
-# 或禁用可能导致冲突的脚本
+# 禁用可能导致冲突的脚本
 chmod -x /path/to/problematic/script
 ```
 
-### 方案 2: 调整 r8169 驱动参数 (禁用 ASPM)
+### 方案 4: 调整 r8169 驱动参数 (禁用 ASPM)
 
 **为什么禁用 ASPM？**
 
@@ -179,13 +324,13 @@ lspci -vvv -s 03:00.0 | grep -i "aspm\|lnkctl"
 # LnkCtl: ASPM Disabled 表示已禁用
 ```
 
-### 方案 3: 检查物理层
+### 方案 5: 检查物理层
 
 1. 更换网线
 2. 测试不同的交换机端口
 3. 检查网卡是否过热
 
-### 方案 4: 固定 PHY 协商参数
+### 方案 6: 固定 PHY 协商参数
 
 > ⚠️ **警告**: 禁用自动协商可能导致网络连接问题。请确保交换机端口配置与以下设置完全匹配，否则可能造成连接丢失。建议在远程管理环境中使用带外管理或物理访问。
 
