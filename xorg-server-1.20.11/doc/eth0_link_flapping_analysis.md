@@ -136,14 +136,29 @@ nmcli connection import type ethernet file /etc/sysconfig/network-scripts/ifcfg-
 chmod -x /path/to/problematic/script
 ```
 
-### 方案 2: 调整 r8169 驱动参数
+### 方案 2: 调整 r8169 驱动参数 (禁用 ASPM)
+
+**为什么禁用 ASPM？**
+
+ASPM (Active State Power Management) 是 PCIe 设备的电源管理功能，用于在空闲时降低功耗。但是，r8169 驱动在某些硬件配置下与 ASPM 存在兼容性问题：
+
+1. **链路状态切换延迟**: ASPM 在 L0s/L1 省电状态和活动状态之间切换时可能导致 PHY 链路不稳定
+2. **唤醒延迟导致超时**: 从低功耗状态恢复时的延迟可能导致 PHY 重新初始化
+3. **已知问题**: r8169 驱动在 Linux 内核中有多个与 ASPM 相关的稳定性问题报告，特别是在某些主板芯片组上
+
+从日志中观察到的 `Generic FE-GE Realtek PHY r8169-0-300:00: attached PHY driver` 反复出现，可能与 ASPM 状态切换导致的 PHY 重新初始化有关。
 
 ```bash
-# 创建驱动配置
+# 创建驱动配置禁用 ASPM
 echo "options r8169 aspm=0" > /etc/modprobe.d/r8169.conf
 
-# 禁用 ASPM 可能有助于稳定性
+# 重新加载驱动使配置生效
+modprobe -r r8169 && modprobe r8169
+
+# 或者重启系统
 ```
+
+> **注意**: 禁用 ASPM 会略微增加功耗，但可以提高链路稳定性。
 
 ### 方案 3: 检查物理层
 
