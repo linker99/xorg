@@ -359,6 +359,9 @@ modprobe -r r8169 && modprobe r8169
 **使用 ethtool 配置高性能参数**
 
 ```bash
+# 禁用 EEE (Energy Efficient Ethernet) - 推荐用于解决链路不稳定问题
+ethtool --set-eee eth0 eee off
+
 # 禁用节能模式 (Wake-on-LAN 相关)
 ethtool -s eth0 wol d
 
@@ -375,6 +378,26 @@ ethtool -K eth0 tso on gso on gro on
 ethtool -C eth0 adaptive-rx on adaptive-tx on
 ```
 
+> **关于 EEE (Energy Efficient Ethernet)**:
+> EEE 是 IEEE 802.3az 标准，允许网卡在低流量时进入低功耗状态。但这种状态切换可能导致：
+> 1. 链路检测延迟，导致误判为 Link Down
+> 2. PHY 唤醒延迟，导致丢包或连接中断
+> 3. 与某些交换机不兼容，导致链路不稳定
+> 
+> 禁用 EEE 可以提高链路稳定性，代价是略微增加功耗。
+
+**验证 EEE 状态**
+
+```bash
+# 查看当前 EEE 状态
+ethtool --show-eee eth0
+
+# 输出示例 (已禁用):
+# EEE status: disabled
+# Tx LPI: disabled
+# Rx LPI: disabled
+```
+
 **持久化 ethtool 配置**
 
 方法 1: 使用 NetworkManager dispatcher 脚本
@@ -382,6 +405,7 @@ ethtool -C eth0 adaptive-rx on adaptive-tx on
 cat > /etc/NetworkManager/dispatcher.d/99-r8169-tuning << 'EOF'
 #!/bin/bash
 if [ "$1" = "eth0" ] && [ "$2" = "up" ]; then
+    ethtool --set-eee eth0 eee off 2>/dev/null
     ethtool -s eth0 wol d
     ethtool -G eth0 rx 4096 tx 4096 2>/dev/null
     ethtool -K eth0 rx on tx on tso on gso on gro on
@@ -394,7 +418,7 @@ chmod +x /etc/NetworkManager/dispatcher.d/99-r8169-tuning
 方法 2: 使用 udev 规则
 ```bash
 cat > /etc/udev/rules.d/99-r8169-tuning.rules << 'EOF'
-ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth0", RUN+="/sbin/ethtool -s eth0 wol d", RUN+="/sbin/ethtool -K eth0 rx on tx on tso on gso on gro on"
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth0", RUN+="/sbin/ethtool --set-eee eth0 eee off", RUN+="/sbin/ethtool -s eth0 wol d", RUN+="/sbin/ethtool -K eth0 rx on tx on tso on gso on gro on"
 EOF
 udevadm control --reload-rules
 ```
@@ -408,6 +432,7 @@ After=network.target
 
 [Service]
 Type=oneshot
+ExecStart=/sbin/ethtool --set-eee eth0 eee off
 ExecStart=/sbin/ethtool -s eth0 wol d
 ExecStart=/sbin/ethtool -G eth0 rx 4096 tx 4096
 ExecStart=/sbin/ethtool -K eth0 rx on tx on tso on gso on gro on
