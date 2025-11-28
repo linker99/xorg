@@ -1,5 +1,11 @@
 # KVM Internal Error Analysis
 
+This document analyzes KVM internal errors (Suberror 3: KVM_INTERNAL_ERROR_EMULATION) and provides solutions.
+
+---
+
+# Case 1: Linux Guest KVM Error Analysis
+
 ## Error Summary
 
 This document analyzes the following KVM internal error and provides solutions.
@@ -189,7 +195,7 @@ Ensure the guest sees the correct CPU features:
 qemu-system-x86_64 -cpu host,+vmx,+svm ...
 ```
 
-## Recommended Approach
+## Recommended Approach for Linux Guests
 
 For most cases, try the solutions in this order:
 
@@ -198,9 +204,207 @@ For most cases, try the solutions in this order:
 3. **Third:** Update QEMU/KVM and guest kernel to latest versions
 4. **Fourth:** Review and adjust QEMU CPU configuration
 
+---
+
+# Case 2: Windows Guest KVM Error Analysis
+
+## Error Summary
+
+```
+KVM internal error. Suberror: 3
+extra data[0]: 0x000000008000002f
+extra data[1]: 0x0000000080000001
+extra data[2]: 0x0000000080000d82
+extra data[3]: 0x0000000080000038
+```
+
+## Register State at Error
+
+| Register | Value              | Interpretation                        |
+|----------|--------------------|-----------------------------------------|
+| RAX      | 0000000000000000   | Zero                                   |
+| RBX      | ffffd00173a81180   | Kernel pointer (Windows KPCR area)     |
+| RCX      | 0000000000000000   | Zero                                   |
+| RDX      | 0000000000000000   | Zero                                   |
+| RSI      | 0000000000000000   | Zero                                   |
+| RDI      | 0000000000000046   | 70 decimal                             |
+| RBP      | ffffd00173aae010   | Stack base pointer                     |
+| RSP      | ffffd00173aadf88   | Stack pointer                          |
+| RIP      | fffff804015a2      | Windows kernel code (truncated in log) |
+| RFL      | 00000096           | Flags: [--S-AP-]                        |
+| CPL      | 0                  | Ring 0 (kernel mode)                   |
+| CR2      | 0000000000000030   | Page fault address (null ptr area)     |
+
+## Operating System Detection
+
+Based on the segment registers, this is a **Windows kernel**:
+
+| Segment | Value | Description                              |
+|---------|-------|------------------------------------------|
+| CS      | 0010  | 64-bit kernel code segment (DPL=0)       |
+| SS      | 0018  | Kernel stack segment (DPL=0)             |
+| DS/ES   | 002b  | User mode data segment (DPL=3)           |
+| FS      | 0053  | Windows TEB pointer (base=7fe87000)      |
+| GS      | 002b  | Kernel KPCR/PRCB (base=ffffd00173a81000) |
+
+## Extra Data Analysis
+
+- **extra data[0]: 0x8000002f**
+  - Bit 31 set = instruction recognized as valid
+  - Low byte 0x2f = 47 = **EPT violation** (VM Exit Reason)
+
+- **extra data[1]: 0x80000001**
+  - EPT violation qualification flags
+
+- **extra data[2]: 0x80000d82**
+  - EPT violation related data
+
+- **extra data[3]: 0x80000038**
+  - Additional exit context
+
+## Instruction Analysis
+
+### Machine Code at RIP
+
+```
+Code=48 8b 40 48 48 85 c0 74 e5 48 ff e0 90 90 90 90 90 90 90 90 <48> 83 ec 28 ...
+```
+
+The `<48>` marker indicates the instruction pointer position.
+
+### Decoded Instructions
+
+**Before RIP (preceding code):**
+
+| Bytes        | Instruction          | Description                    |
+|--------------|----------------------|--------------------------------|
+| 48 8b 40 48  | mov rax, [rax+0x48]  | Load pointer from structure    |
+| 48 85 c0     | test rax, rax        | Check if null                  |
+| 74 e5        | jz short -0x1b       | Jump if zero                   |
+| 48 ff e0     | jmp rax              | Indirect jump through RAX      |
+| 90 90 90...  | nop (padding)        | Alignment padding              |
+
+**At RIP (current instruction):**
+
+| Bytes        | Instruction          | Description                    |
+|--------------|----------------------|--------------------------------|
+| **48 83 ec 28** | **sub rsp, 0x28** | **Allocate 40 bytes on stack** |
+| 48 85 c9     | test rcx, rcx        | Check if RCX is null           |
+| 75 0b        | jnz short +0xb       | Jump if not zero               |
+| 48 83 c4 28  | add rsp, 0x28        | Deallocate stack               |
+| 48 ff 25 ... | jmp qword [rip+...]  | Indirect jump via RIP          |
+
+### Identified Pattern
+
+This is a **Windows kernel function prologue**:
+- `sub rsp, 0x28` allocates 40 bytes (0x28 hex = 40 decimal): 32 bytes shadow space + 8 bytes alignment
+- This is the entry point of a kernel function
+
+## Root Cause
+
+The instruction `sub rsp, 0x28` (stack allocation) is a normal instruction that should not fail.
+
+### Primary Cause: EPT Violation
+
+The extra data suggests an **Extended Page Tables (EPT) violation**:
+
+1. **Memory Mapping Issue**: The stack page or code page at RIP is not properly mapped in EPT
+2. **CR2=0x30**: Indicates a nearby null pointer dereference or invalid memory access
+3. **Windows-specific**: Windows kernel may be accessing unmapped virtualization-related memory
+
+### Contributing Factors
+
+1. **Hyper-V Conflicts**: Windows may be trying to use Hyper-V features that conflict with KVM
+2. **VBS/HVCI**: Virtualization-Based Security or Hypervisor-enforced Code Integrity
+3. **Memory Configuration**: EPT not properly configured for all guest memory regions
+
+## Solutions for Windows Guest
+
+### Solution 1: Enable Hyper-V Enlightenments in QEMU
+
+```bash
+qemu-system-x86_64 \
+  -cpu host,hv_relaxed,hv_spinlocks=0x1fff,hv_vapic,hv_time,hv_crash,hv_reset,hv_vpindex,hv_runtime,hv_synic,hv_stimer \
+  ...
+```
+
+These enlightenments help Windows run better under KVM.
+
+### Solution 2: Disable Conflicting Windows Features
+
+In the Windows guest, disable these features:
+
+```cmd
+REM Disable Hyper-V
+bcdedit /set hypervisorlaunchtype off
+
+REM Disable Virtualization Based Security (VBS)
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard" /v EnableVirtualizationBasedSecurity /t REG_DWORD /d 0 /f
+
+REM Disable Credential Guard
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\LSA" /v LsaCfgFlags /t REG_DWORD /d 0 /f
+
+REM Reboot required
+shutdown /r /t 0
+```
+
+### Solution 3: Use Proper CPU Model
+
+```bash
+# Use host CPU passthrough
+qemu-system-x86_64 -cpu host ...
+
+# Or use a specific CPU model known to work well
+qemu-system-x86_64 -cpu Skylake-Client-v3 ...
+```
+
+### Solution 4: Configure KVM Module
+
+```bash
+# Ignore unknown MSRs (same as Linux guest)
+echo "options kvm ignore_msrs=1" | sudo tee /etc/modprobe.d/kvm.conf
+
+# Reload KVM module
+sudo modprobe -r kvm_intel && sudo modprobe kvm_intel
+```
+
+### Solution 5: Check Memory Configuration
+
+```bash
+# Use a proper memory backend
+qemu-system-x86_64 \
+  -m 4G \
+  -object memory-backend-memfd,id=mem,size=4G,share=on \
+  -numa node,memdev=mem \
+  ...
+```
+
+### Solution 6: Update QEMU/KVM
+
+Ensure you're running the latest versions:
+
+```bash
+# Ubuntu/Debian
+sudo apt update && sudo apt upgrade qemu-system-x86 libvirt-daemon-system
+
+# RHEL/CentOS/Fedora
+sudo dnf update qemu-kvm libvirt
+```
+
+## Recommended Approach for Windows Guests
+
+1. **First:** Disable Hyper-V and VBS in the Windows guest
+2. **Second:** Add Hyper-V enlightenments to QEMU command line
+3. **Third:** Configure `ignore_msrs=1` in KVM module
+4. **Fourth:** Ensure using `-cpu host` or appropriate CPU model
+5. **Fifth:** Update all virtualization software to latest versions
+
+---
+
 ## References
 
 - [KVM Documentation](https://www.kernel.org/doc/html/latest/virt/kvm/)
 - [QEMU Documentation](https://www.qemu.org/documentation/)
 - [Intel SDM Volume 4 - Model-Specific Registers](https://software.intel.com/content/www/us/en/develop/articles/intel-sdm.html)
 - Linux Kernel source: `arch/x86/kernel/process.c` (idle functions)
+- [Windows Hyper-V Enlightenments in QEMU](https://www.qemu.org/docs/master/system/i386/hyperv.html)
