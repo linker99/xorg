@@ -7,12 +7,27 @@ eth0 网络接口频繁 up/down，导致网络连接不稳定。
 ## 系统配置
 
 ```
+操作系统: OpenEuler
 网卡驱动: r8169 (Realtek Gigabit Ethernet)
 PCI地址: 0000:03:00.0
 PHY类型: Generic FE-GE Realtek PHY
 网络配置: eth0 作为 bond0 的 slave 接口
 连接速度: 1Gbps/Full Duplex
 ```
+
+## 问题现象总结
+
+根据现场测试结果：
+
+| 测试场景 | 现象 | 恢复时间 |
+|---------|------|----------|
+| NM_CONTROLLED=no + 完整配置 | eth0 无法恢复，需多次重启 network | >10分钟 |
+| NM_CONTROLLED=yes + 仅eth0 | 手动重启 network 可立即恢复 | 5分钟内 |
+| 仅 network 服务 + 仅eth0 | 5分钟可自动恢复 | 5分钟 |
+| 仅 network 服务 + eth0+bond | 十几分钟无法自恢复 | >10分钟 |
+| 重启 NetworkManager | 不能立即恢复 | - |
+
+**关键发现**: PC 启动时间远小于交换机，PC 启动时交换机还未就绪，相当于拔网线启动。
 
 ## 日志分析
 
@@ -45,7 +60,42 @@ PHY类型: Generic FE-GE Realtek PHY
 
 ## 可能的根本原因
 
-### 1. Bond/VLAN 初始化顺序问题 (高度可能)
+### 1. 交换机启动延迟 (根本原因)
+
+**现象**: PC 掉电重启后大概率出现网络问题
+
+**原因分析**:
+- PC 启动时间远小于交换机启动时间
+- PC 启动时交换机还未完成初始化，物理链路不可用
+- 相当于 "拔网线启动" 的场景
+- r8169 驱动在检测不到链路时会反复尝试初始化 PHY
+
+**证据**:
+- 仅配置 eth0 时，5分钟可自动恢复（等待交换机就绪）
+- 加入 bond 后，恢复时间大幅延长（bond 的链路检测机制干扰）
+
+### 2. Bond 配置加剧问题
+
+**现象**: 加上 bond 后，十几分钟无法自恢复
+
+**原因分析**:
+- Bond 接口的 miimon 链路检测会频繁检查 slave 状态
+- 当 eth0 不稳定时，bond 会反复触发 slave 接口的 up/down
+- Bond 的重试机制与 r8169 驱动的重试机制产生冲突
+- 形成恶性循环：eth0 down → bond 检测到 → 触发重置 → eth0 再次 down
+
+### 3. NetworkManager vs network-scripts 冲突
+
+**现象**:
+- NM_CONTROLLED=no 时问题更严重
+- 重启 NetworkManager 不能恢复，重启 network 服务可以恢复
+
+**原因分析**:
+- network-scripts 已弃用，存在初始化竞争条件
+- 两个网络管理服务同时存在时可能冲突
+- NetworkManager 有更好的链路检测和恢复机制
+
+### 4. Bond/VLAN 初始化顺序问题 (高度可能)
 
 **症状特征**:
 - 仅配置 eth0 时，重启后问题依然存在
@@ -159,6 +209,64 @@ cat /sys/module/r8169/parameters/*
 ```
 
 ## 建议解决方案
+
+### 方案 0: 解决交换机启动延迟问题 (针对根本原因)
+
+由于 PC 启动速度快于交换机，需要让网络服务等待交换机就绪后再初始化。
+
+**方法 1: 增加网络服务启动延迟**
+
+```bash
+# 创建延迟启动的 systemd 服务
+cat > /etc/systemd/system/network-wait-switch.service << 'EOF'
+[Unit]
+Description=Wait for switch to be ready before network
+Before=network.target NetworkManager.service network.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# 等待 60 秒让交换机完成启动
+ExecStart=/bin/sleep 60
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable network-wait-switch.service
+```
+
+**方法 2: 配置网络服务等待链路就绪**
+
+```bash
+# 在 ifcfg-eth0 中添加链路检测超时
+cat >> /etc/sysconfig/network-scripts/ifcfg-eth0 << 'EOF'
+# 等待链路就绪的超时时间（秒）
+LINKDELAY=60
+EOF
+```
+
+**方法 3: 配置 Bond 的链路检测参数**
+
+```bash
+# 修改 bond 配置，增加链路检测容错
+cat /etc/sysconfig/network-scripts/ifcfg-bond0
+# 修改 BONDING_OPTS:
+BONDING_OPTS="mode=active-backup miimon=100 updelay=5000 downdelay=2000"
+# updelay=5000: 链路 up 后等待 5 秒才认为可用
+# downdelay=2000: 链路 down 后等待 2 秒才认为断开
+```
+
+**方法 4: 使用 NetworkManager 的连接重试机制**
+
+```bash
+# 确保使用 NetworkManager 并配置自动重连
+nmcli connection modify eth0 connection.autoconnect yes
+nmcli connection modify eth0 connection.autoconnect-retries -1  # 无限重试
+nmcli connection modify eth0 ipv4.dhcp-timeout 300  # DHCP 超时 5 分钟
+```
 
 ### 方案 1: 修复 Bond/VLAN 初始化顺序 (推荐首先尝试)
 
