@@ -88,6 +88,59 @@ diff <(tr '[:upper:]' '[:lower:]' < expected.log) <(tr '[:upper:]' '[:lower:]' <
 
 The best long-term solution is to make the test data independent of the build machine's hostname. The test should use a fixed, predictable hostname value or normalize hostnames before comparison.
 
+### Solution 5: Modify rsyslog Source Code (如何修改rsyslog代码)
+
+If you need to change rsyslog's hostname processing behavior in the source code:
+
+**1. Clone the rsyslog repository:**
+```bash
+git clone https://github.com/rsyslog/rsyslog.git
+cd rsyslog
+```
+
+**2. Locate the hostname processing code:**
+
+The hostname lowercasing happens in the parser module. Key files to examine:
+
+- `runtime/msg.c` - Message processing and hostname handling
+- `runtime/parser.c` - Syslog message parser
+- `runtime/glbl.c` - Global configuration including `preserveFQDN`
+
+**3. Find the lowercase conversion:**
+
+Search for lowercase conversion in the codebase:
+```bash
+grep -r "tolower" runtime/
+grep -r "HOSTNAME" runtime/msg.c
+```
+
+The conversion typically occurs in `MsgSetHOSTNAME()` or similar functions in `runtime/msg.c`.
+
+**4. Modify the code:**
+
+In `runtime/msg.c`, look for code similar to:
+```c
+/* Convert hostname to lowercase for RFC compliance */
+for(i = 0; i < lenHOSTNAME; i++) {
+    pszHOSTNAME[i] = tolower(pszHOSTNAME[i]);
+}
+```
+
+To preserve case, you can either:
+- Remove or comment out the lowercase conversion loop
+- Add a configuration option to control this behavior
+- Make it conditional based on the `preserveFQDN` setting
+
+**5. Build and test:**
+```bash
+autoreconf -fvi
+./configure --enable-testbench
+make
+make check
+```
+
+**Note:** Modifying this behavior may affect RFC 1123 compliance. Consider using the configuration option `preserveFQDN="on"` first before modifying source code.
+
 ## SKIP Test Cases (For Reference)
 
 These tests were skipped due to missing dependencies or infrastructure, not code issues:
