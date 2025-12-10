@@ -42,9 +42,12 @@ reboot
 
 ### 方法3: 调整HSR配置参数 (临时方案)
 ```bash
+# 在系统上手动执行此命令，不是修改测试脚本
 # 增加序列号窗口大小以容忍更多乱序
 ip link set dev hsr0 type hsr seqnr_window 128
 ```
+
+**注意**: 此命令应该在系统命令行中执行，用于配置HSR网络接口，而不是添加到`hsr_ping.sh`测试脚本中。
 
 详细的技术分析和其他解决方案请参阅下文。
 
@@ -160,11 +163,29 @@ While not a complete fix, you can adjust HSR parameters to reduce duplicate dete
 
 #### Option A: Increase Sequence Number Window
 
-Modify the HSR network interfaces to use a larger sequence number window:
+Modify the HSR network interfaces to use a larger sequence number window. **This command should be executed on the system command line, NOT added to the test script**:
 
 ```bash
-# Edit HSR interface configuration
+# Run this command on the system to adjust the HSR interface
 ip link set dev hsr0 type hsr seqnr_window 128  # Default is typically 64
+```
+
+**When to use**: Execute this command after the HSR interface (hsr0) is created and before running the test. The setting will persist until the interface is deleted or the system reboots.
+
+**Example workflow**:
+```bash
+# 1. Create HSR interface (if not already created)
+ip link add name hsr0 type hsr slave1 eth0 slave2 eth1 supervision 45
+
+# 2. Adjust sequence number window
+ip link set dev hsr0 type hsr seqnr_window 128
+
+# 3. Bring up the interface
+ip link set dev hsr0 up
+
+# 4. Now run the test
+cd /usr/src/linux-6.6.0-101.0.0.104.u8.fos23.x86_64/tools/testing/selftests/net/hsr
+./hsr_ping.sh
 ```
 
 #### Option B: Disable PRP Mode (Use HSR Mode)
