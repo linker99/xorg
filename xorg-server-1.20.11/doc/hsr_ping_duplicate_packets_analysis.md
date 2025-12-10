@@ -41,13 +41,18 @@ reboot
 ```
 
 ### 方法3: 调整HSR配置参数 (临时方案)
+
+**重要说明**: `hsr_ping.sh`测试脚本会自动创建网络命名空间(network namespace)并在其中创建HSR接口，因此在主系统中看不到`hsr0`接口是正常的。
+
+要应用此方案，需要**修改测试脚本**本身，在脚本创建HSR接口后添加配置命令：
+
 ```bash
-# 在系统上手动执行此命令，不是修改测试脚本
-# 增加序列号窗口大小以容忍更多乱序
-ip link set dev hsr0 type hsr seqnr_window 128
+# 修改 /usr/src/linux-6.6.0-101.0.0.104.u8.fos23.x86_64/tools/testing/selftests/net/hsr/hsr_ping.sh
+# 在创建HSR接口的代码后添加：
+ip netns exec $NS_NAME ip link set dev hsr3 type hsr seqnr_window 128
 ```
 
-**注意**: 此命令应该在系统命令行中执行，用于配置HSR网络接口，而不是添加到`hsr_ping.sh`测试脚本中。
+或者，推荐使用方法1（升级内核）或方法2（应用补丁）来彻底解决问题。
 
 详细的技术分析和其他解决方案请参阅下文。
 
@@ -159,22 +164,48 @@ sudo dnf update kernel kernel-devel
 
 ### Solution 3: Adjust HSR Configuration (Workaround)
 
-While not a complete fix, you can adjust HSR parameters to reduce duplicate detection issues:
+While not a complete fix, you can adjust HSR parameters to reduce duplicate detection issues.
 
-#### Option A: Increase Sequence Number Window
+**Important Note**: The `hsr_ping.sh` test script creates network namespaces and HSR interfaces within those namespaces. The HSR interfaces (like `hsr3`) are NOT visible on the main system - they exist only inside the network namespaces created by the test.
 
-Modify the HSR network interfaces to use a larger sequence number window. **This command should be executed on the system command line, NOT added to the test script**:
+#### Option A: Increase Sequence Number Window (For Test Script)
 
+To apply this workaround to the `hsr_ping.sh` test, you need to **modify the test script itself**:
+
+**Step 1**: Locate the HSR interface creation in the test script:
 ```bash
-# Run this command on the system to adjust the HSR interface
-ip link set dev hsr0 type hsr seqnr_window 128  # Default is typically 64
+# Open the test script
+vi /usr/src/linux-6.6.0-101.0.0.104.u8.fos23.x86_64/tools/testing/selftests/net/hsr/hsr_ping.sh
 ```
 
-**When to use**: Execute this command after the HSR interface (hsr0) is created and before running the test. The setting will persist until the interface is deleted or the system reboots.
-
-**Example workflow**:
+**Step 2**: Find where the HSR interface is created (look for lines like):
 ```bash
-# 1. Create HSR interface (if not already created)
+ip netns exec $NS_NAME ip link add name hsr3 type hsr ...
+```
+
+**Step 3**: Add the configuration command right after the interface creation:
+```bash
+# Add this line after HSR interface creation
+ip netns exec $NS_NAME ip link set dev hsr3 type hsr seqnr_window 128
+```
+
+**Example modification**:
+```bash
+# Original (example from script)
+ip netns exec ns1 ip link add name hsr3 type hsr slave1 ns1eth1 slave2 ns1eth2 supervision 45 version 1
+
+# Add this line immediately after
+ip netns exec ns1 ip link set dev hsr3 type hsr seqnr_window 128
+```
+
+**Note**: The exact namespace name and HSR interface name may vary. Check the script to find the correct values.
+
+#### Option B: Increase Sequence Number Window (For Production HSR)
+
+If you're using HSR in a production environment (not just testing), apply the configuration after creating the interface:
+
+```bash
+# 1. Create HSR interface
 ip link add name hsr0 type hsr slave1 eth0 slave2 eth1 supervision 45
 
 # 2. Adjust sequence number window
@@ -182,13 +213,11 @@ ip link set dev hsr0 type hsr seqnr_window 128
 
 # 3. Bring up the interface
 ip link set dev hsr0 up
-
-# 4. Now run the test
-cd /usr/src/linux-6.6.0-101.0.0.104.u8.fos23.x86_64/tools/testing/selftests/net/hsr
-./hsr_ping.sh
 ```
 
-#### Option B: Disable PRP Mode (Use HSR Mode)
+This will persist until the interface is deleted or the system reboots.
+
+#### Option C: Disable PRP Mode (Use HSR Mode)
 
 If PRP mode is not required, switch to pure HSR mode which has more robust duplicate handling:
 
