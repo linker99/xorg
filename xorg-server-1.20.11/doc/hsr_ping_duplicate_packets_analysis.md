@@ -13,6 +13,43 @@ Full message: 10 packets transmitted, 10 received, +27 duplicates, 0% packet los
 
 The test expects 10 packets with no duplicates, but receives 27 duplicate packets.
 
+## Quick Fix Guide (快速修复指南)
+
+**问题原因**: Linux 6.6内核的PRP重复检测逻辑存在bug，无法正确处理乱序到达的数据帧。
+
+**推荐解决方案** (按优先级排序):
+
+### 方法1: 升级内核 (最简单)
+```bash
+# 升级到包含修复补丁的新版本内核
+sudo dnf update kernel kernel-devel
+# 重启后选择新内核启动
+```
+
+### 方法2: 应用内核补丁 (最彻底)
+```bash
+cd /usr/src/linux-6.6.0-101.0.0.104.u8.fos23.x86_64/
+# 下载并应用PRP修复补丁
+wget https://lkml.org/lkml/2025/3/4/881 -O hsr_prp_fix.patch
+patch -p1 < hsr_prp_fix.patch
+# 重新编译内核
+make -j$(nproc)
+make modules_install
+make install
+# 重启系统
+reboot
+```
+
+### 方法3: 调整HSR配置参数 (临时方案)
+```bash
+# 增加序列号窗口大小以容忍更多乱序
+ip link set dev hsr0 type hsr seqnr_window 128
+```
+
+详细的技术分析和其他解决方案请参阅下文。
+
+---
+
 ## Background: HSR Protocol
 
 HSR (IEC 62439-3) is a network redundancy protocol that provides seamless failover by:
