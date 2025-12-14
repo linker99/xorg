@@ -102,37 +102,129 @@ ip netns exec $NS_NAME ip link set dev hsr3 type hsr seqnr_window 128
 
 ### 6.6到6.18之间的HSR修复
 
-从内核6.6到6.18，HSR子系统包含多个关键修复：
+从内核6.6到6.18，HSR子系统包含多个关键修复。以下是实际的commit列表及分析：
 
-#### 1. PRP重复检测改进 (kernel 6.7-6.8)
+#### 核心修复 (直接解决重复包问题)
+
+**1. `05fd00e5e7b1` net: hsr: Fix PRP duplicate detection** ⭐ **最关键**
+- **影响**: 直接修复了PRP重复检测的核心bug
 - **文件**: `net/hsr/hsr_framereg.c`
-- **修复**: 改进了`hsr_register_frame_in()`中的序列号窗口管理
-- **影响**: 修复了乱序帧到达时的重复检测失败问题
+- **说明**: 这是导致27个重复包的根本原因所在，修复了序列号窗口管理逻辑
 
-#### 2. 每端口序列号追踪优化 (kernel 6.8+)
-- **文件**: `net/hsr/hsr_forward.c`, `net/hsr/hsr_framereg.c`
-- **修复**: 增强了`node->seq_out[port->type]`的独立管理
-- **影响**: 解决了多节点环境下的路径关联问题
+**2. `430d67bdcb04` net: hsr: Use the seqnr lock for frames received via interlink port.**
+- **影响**: 修复了interlink端口接收帧时的序列号同步问题
+- **文件**: `net/hsr/hsr_forward.c`
+- **说明**: 确保序列号检查时的线程安全性
 
-#### 3. 虚拟网络支持改进 (kernel 6.9+)
+**3. `b3c9e65eb227` net: hsr: remove seqnr_lock**
+- **影响**: 重构序列号处理机制，移除不必要的锁
+- **文件**: `net/hsr/hsr_framereg.c`, `net/hsr/hsr_forward.c`
+- **说明**: 优化了性能同时保持正确性
+
+**4. `35e24f28c2e9` net: hsr: Remove interlink_sequence_nr.**
+- **影响**: 清理了过时的interlink序列号处理代码
+- **文件**: `net/hsr/hsr_main.h`, `net/hsr/hsr_framereg.c`
+- **说明**: 简化了代码逻辑，减少出错可能
+
+#### HSRv0特定修复
+
+**5. `96a3a03abf3d` hsr: Fix supervision frame sending on HSRv0**
+- **影响**: 修复了HSRv0 supervision帧的发送问题
 - **文件**: `net/hsr/hsr_device.c`
-- **修复**: 更好地支持veth接口的HSR功能
-- **影响**: 减少了虚拟环境中的误报重复包
+- **说明**: 提高了HSRv0的稳定性
+
+**6. `b2c26c82f7a9` hsr: Follow standard for HSRv0 supervision frames**
+- **影响**: 使HSRv0遵循标准规范
+- **文件**: `net/hsr/hsr_device.c`
+- **说明**: 确保与标准兼容性
+
+#### 安全性和稳定性改进
+
+**7. `0f5697f1a3f9` net: hsr: fix fill_frame_info() regression vs VLAN packets**
+- **影响**: 修复了VLAN包处理回归
+- **文件**: `net/hsr/hsr_forward.c`
+- **说明**: 解决了VLAN环境下的问题
+
+**8. `b9653d19e556` net: hsr: avoid potential out-of-bound access in fill_frame_info()**
+- **影响**: 修复潜在的越界访问
+- **文件**: `net/hsr/hsr_forward.c`
+- **说明**: 提高代码安全性
+
+**9. `a7789fd4caaf` net: hsr: prevent NULL pointer dereference in hsr_proxy_announce()**
+- **影响**: 防止空指针解引用
+- **文件**: `net/hsr/hsr_device.c`
+- **说明**: 修复潜在的崩溃问题
+
+**10. `7af76e9d18a9` net, hsr: reject HSR frame if skb can't hold tag**
+- **影响**: 拒绝无效的HSR帧
+- **文件**: `net/hsr/hsr_forward.c`
+- **说明**: 防止处理格式错误的帧
+
+#### 锁和并发处理改进
+
+**11. `847748fc66d0` hsr: hold rcu and dev lock for hsr_get_port_ndev**
+- **影响**: 改进RCU和设备锁的使用
+- **文件**: `net/hsr/hsr_main.c`
+
+**12. `8884c6939913` hsr: use rtnl lock when iterating over ports**
+- **影响**: 使用正确的锁保护端口迭代
+- **文件**: `net/hsr/hsr_main.c`
+
+**13. `393c841fe433` hsr: use hsr_for_each_port_rtnl in hsr_port_get_hsr**
+- **影响**: 统一端口遍历方式
+- **文件**: `net/hsr/hsr_main.c`
+
+#### 其他功能增强
+
+**14. `814dbf4b6c95` net: hsr: Add KUnit test for PRP**
+- **影响**: 添加单元测试
+- **文件**: `net/hsr/hsr_test.c` (新增)
+- **说明**: 提高代码质量和可测试性
+
+**15. `1a8a63a5305e` net: hsr: Add VLAN CTAG filter support**
+**16. `d977d7eb09fe` net: hsr: Add VLAN support**
+- **影响**: 增加VLAN支持
+- **文件**: `net/hsr/hsr_forward.c`, `net/hsr/hsr_device.c`
+
+**17. `b65999e7238e` net: hsr: sync hw addr of slave2 according to slave1 hw addr on PRP**
+- **影响**: 同步PRP模式下的硬件地址
+- **文件**: `net/hsr/hsr_slave.c`
+
+### 最相关的修复总结
+
+对于您遇到的"27个重复包"问题，最重要的修复是：
+
+1. **`05fd00e5e7b1`** - Fix PRP duplicate detection (核心修复)
+2. **`430d67bdcb04`** - Use seqnr lock for interlink port
+3. **`b3c9e65eb227`** - Remove seqnr_lock (重构)
+4. **`35e24f28c2e9`** - Remove interlink_sequence_nr
+
+这4个commit共同解决了PRP重复检测的核心问题。
 
 ### 查看具体修复commit
 
-如果您有6.18内核源码，可以查看相关修复：
+如果您有6.18内核源码，可以查看这些关键修复的详细内容：
 
 ```bash
 cd /root/linux-6.18
-# 查看6.6到6.18之间所有HSR相关修改
-git log --oneline --grep="hsr" v6.6..v6.18 -- net/hsr/
 
-# 查看具体文件的修改
-git log -p v6.6..v6.18 -- net/hsr/hsr_framereg.c
+# 查看最关键的PRP重复检测修复
+git show 05fd00e5e7b1
 
-# 对比关键函数的变化
-git diff v6.6..v6.18 -- net/hsr/hsr_framereg.c | grep -A 10 "hsr_register_frame_in"
+# 查看interlink端口序列号锁修复
+git show 430d67bdcb04
+
+# 查看序列号锁移除/重构
+git show b3c9e65eb227
+
+# 查看HSRv0 supervision帧修复
+git show 96a3a03abf3d
+
+# 查看所有HSR相关修改
+git log --oneline v6.6..v6.18 -- net/hsr/
+
+# 对比hsr_framereg.c的变化（重复检测核心文件）
+git diff v6.6..v6.18 -- net/hsr/hsr_framereg.c
 ```
 
 ### 推荐行动方案
@@ -147,16 +239,40 @@ sudo dnf install kernel-6.18.* kernel-devel-6.18.*
 reboot
 ```
 
-**替代方案**: 如果必须使用6.6内核，可以从6.18回移植HSR相关补丁
+**替代方案**: 如果必须使用6.6内核，可以回移植关键补丁
+
+**最小修复集** (只需要核心修复commits):
 ```bash
-cd /usr/src/linux-6.6.0-101.0.0.104.u8.fos23.x86_64/
-# 提取6.6到6.18之间的HSR patch
 cd /root/linux-6.18
+# 提取4个最关键的修复patch
+git format-patch -1 05fd00e5e7b1  # Fix PRP duplicate detection
+git format-patch -1 430d67bdcb04  # Use seqnr lock for interlink
+git format-patch -1 b3c9e65eb227  # Remove seqnr_lock
+git format-patch -1 35e24f28c2e9  # Remove interlink_sequence_nr
+
+# 应用到6.6内核
+cd /usr/src/linux-6.6.0-101.0.0.104.u8.fos23.x86_64/
+git am /root/linux-6.18/0001-*.patch
+git am /root/linux-6.18/0002-*.patch
+git am /root/linux-6.18/0003-*.patch
+git am /root/linux-6.18/0004-*.patch
+
+# 重新编译
+make -j$(nproc) && make modules_install && make install
+reboot
+```
+
+**完整修复集** (包含所有HSR相关修复):
+```bash
+cd /root/linux-6.18
+# 提取所有HSR patch
 git format-patch v6.6..v6.18 -- net/hsr/
-# 应用patch到6.6内核
+
+# 应用到6.6内核
 cd /usr/src/linux-6.6.0-101.0.0.104.u8.fos23.x86_64/
 git am /root/linux-6.18/*.patch
 make -j$(nproc) && make modules_install && make install
+reboot
 ```
 
 ---
